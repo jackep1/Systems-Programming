@@ -1,0 +1,421 @@
+//
+// Created by jack on 10/25/24.
+//
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <algorithm>
+#include <queue>
+#include <map>
+#include <random>
+#include <unistd.h>
+#include <sys/wait.h>
+#include "Node.h"
+
+using namespace std;
+
+// Opens a file for reading with error reporting
+ifstream vin_open(const string& file_path)
+{
+    ifstream file(file_path);
+    if (!file.is_open()) {
+        cout << "Error opening file: " << file_path << endl;
+        exit(2);
+    }
+    return file;
+}
+
+vector<vector<float>> build_weight_grid(ifstream& grid_file)
+{
+    // Get and validate dimensions
+    string cols, rows;
+    int num_cols, num_rows;
+    getline(grid_file, cols, ' ');
+    getline(grid_file, rows);
+    try
+    {
+        num_cols = stoi(cols);
+        num_rows = stoi(rows);
+    }
+    catch (...)
+    {
+        cout << "Number of rows and columns must be integers" << endl;
+        exit(3);
+    }
+    if (num_cols <= 0 || num_rows <= 0)
+    {
+        cout << "Number of rows and columns must be positive" << endl;
+        exit(4);
+    }
+
+    // Build grid
+    vector<vector<float>> weight_grid(num_rows, vector<float>(num_cols, 0));
+    string line;
+    for (int i = 0; i < num_rows; i++)
+    {
+        try
+        {
+            getline(grid_file, line);
+        }
+        catch (...)
+        {
+            cout << "Dimensions given larger than file" << endl;
+            exit(5);
+        }
+        istringstream iss(line);
+        string location;
+        for (int j = 0; j < num_cols; j++)
+        {
+            iss >> location;
+            try
+            {
+                weight_grid[i][j] = stof(location);
+            }
+            catch (...)
+            {
+                cout << "Grid must contain numerical values" << endl;
+                exit(6);
+            }
+        }
+    }
+
+    if (getline(grid_file, line))
+    {
+        cout << "Dimensions given smaller than file" << endl;
+        exit(7);
+    }
+
+    return weight_grid;
+}
+
+vector<Node> build_nodes(ifstream& node_file)
+{
+
+    string s_nodes;
+    int num_nodes;
+    getline(node_file, s_nodes);
+    try
+    {
+        num_nodes = stoi(s_nodes);
+    }
+    catch (...)
+    {
+        cout << "Number of nodes must be an integer" << endl;
+        exit(10);
+    }
+    if (num_nodes <= 0)
+    {
+        cout << "Number of nodes must be positive" << endl;
+        exit(11);
+    }
+
+    vector<Node> nodes(num_nodes);
+    for (int i = 1; i <= num_nodes; i++)
+    {
+        string node_row, node_col;
+        getline(node_file, node_row, ' ');
+        getline(node_file, node_col, ' ');
+        try
+        {
+            const Node n(i, stoi(node_row), stoi(node_col));
+            nodes[i - 1] = n;
+        }
+        catch (...)
+        {
+            cout << "Node " << i << " given invalid indices" << endl;
+            exit(12);
+        }
+    }
+
+    return nodes;
+}
+
+// Breadth-first search to find all paths between two nodes which
+// are at least min_length steps and no longer than max_length steps
+vector<vector<int>> find_all_paths(int start_idx, const int end_idx, const int min_length, const int max_length, const vector<Node> &nodes)
+{
+
+    vector<vector<int>> all_paths;
+
+    // Queue of discovered but unvisited nodes, begins only with the start node
+    queue<vector<int>> to_visit;
+    to_visit.push({start_idx});
+
+    while (!to_visit.empty()) {
+
+        // Get a path from queue
+        vector<int> current_path = to_visit.front();
+        to_visit.pop();
+
+        // Get the latest node in the path
+        const int current_node = current_path.back();
+
+        // If the path is long enough and the end node is reached, add the path to the list of all paths
+        if (current_node == end_idx && current_path.size() >= min_length) {
+            all_paths.push_back(current_path);
+        }
+
+        // If the path is not too long, add all neighbors of the current node to the queue
+        if (current_path.size() < max_length) {
+
+            // Index offset by 1
+            const set<int>& current_neighbors = nodes[current_node - 1].neighbors;
+
+            // For each neighbor
+            for (const int neighbor : current_neighbors) {
+                // Not already in the path
+                if (find(current_path.begin(), current_path.end(), neighbor) == current_path.end()) {
+                    vector<int> new_path = current_path;
+                    // Add it to the path
+                    new_path.push_back(neighbor);
+                    // Add the new path to the queue
+                    to_visit.push(new_path);
+                }
+            }
+        }
+    }
+
+    return all_paths;
+}
+
+
+// Breadth-first search to find the cheapest path between two nodes
+// which are overlaid on the grid of costs.
+vector<Coordinate> find_cheapest_path(const int start_node_idx, const int end_node_idx, const vector<vector<float> > &weight_grid, const vector<Node> &nodes, float& cost)
+{
+    // Map {current, predecessor}
+    map<Coordinate, Coordinate> visited;
+    // Map {current, cost}
+    map<Coordinate, float> accum_cost;
+    // Queue of discovered but unvisited locations on the grid
+    queue<Coordinate> to_visit;
+
+    const Coordinate start_location = nodes[start_node_idx - 1].coord;
+    const Coordinate end_location = nodes[end_node_idx - 1].coord;
+
+    // Add first location with no previous
+    visited[start_location] = Coordinate{-1, -1};
+    accum_cost[start_location] = 0;
+    to_visit.push(start_location);
+
+    // While there are paths to check
+    while(!to_visit.empty()) {
+        // Get a location from the queue
+        Coordinate current_location = to_visit.front();
+        to_visit.pop();
+
+        // If we've reached our goal and the weight/cost of this path
+        // is the lowest possible, return this path
+        if (current_location == end_location) {
+            break;
+        }
+
+        // If we have further to go, try all 8-adjacent neighbors
+        for (const auto& move : {Coordinate{-1, -1}, {-1, 0}, {-1, 1},
+                                            {0, -1},          {0, 1},
+                                            {1, -1}, {1, 0}, {1, 1}}) {
+            Coordinate next_location = {current_location[0] + move[0], current_location[1] + move[1]};
+
+            // Check bounds
+            if (next_location[0] >= 1 && next_location[0] <= weight_grid.size() &&
+                next_location[1] >= 1 && next_location[1] <= weight_grid[0].size()) {
+
+                // Get weight to this new location
+                const float prev_weight = accum_cost[current_location];
+                const float new_weight = prev_weight + weight_grid[next_location[0] - 1][next_location[1] - 1];
+                //cout << new_weight << endl;
+                // If we haven't been here, or this new path is cheaper than the previous
+                if (accum_cost.find(next_location) == accum_cost.end() || new_weight < accum_cost[next_location]) {
+
+                    // Add this location to visited set
+                    visited[next_location] = current_location;
+                    accum_cost[next_location] = new_weight;
+                    to_visit.push(next_location);
+                }
+            }
+        }
+    }
+    // Once all directions have been searched, reconstruct path from predecessor set
+    vector<Coordinate> path;
+    Coordinate current_location = end_location;
+
+    while (current_location != Coordinate{-1, -1}) {
+        path.push_back(current_location);
+        current_location = visited[current_location];
+    }
+    reverse(path.begin(), path.end());
+    cost = accum_cost[end_location];
+
+    return path;
+}
+
+
+int main(const int argc, char *argv[])
+{
+    // Check for proper use of the program
+    if (argc != 7)
+    {
+        cout << "Program usage: ./prog04v1 <grid_file> <node_file> <start_node_index> <end_node_index> <scrap_folder> <output_file>" << endl;
+        return 1;
+    }
+    auto scrap_path = string(argv[5]);
+    auto output_path = string(argv[6]);
+    ofstream outfile(output_path);
+
+
+    /////* GRID CONSTRUCTION */////
+    ifstream grid_file = vin_open(argv[1]); // First arg points to the grid's file path
+    vector<vector<float>> weight_grid = build_weight_grid(grid_file); // Build the grid
+    grid_file.close(); // Done with grid file
+
+
+    /////* NODE CREATION */////
+    ifstream node_file = vin_open(argv[2]); // Second argument points to the nodes' file path
+    vector<Node> nodes = build_nodes(node_file); // Build list of nodes
+    node_file.close(); // Done with node file
+
+    // Write initial node info to file
+    outfile << "Initial Node List" << endl << "-----------------" << endl;
+    for (const auto& n : nodes) {
+        outfile << "\tNode " << n.index << ":" << endl;
+        outfile << "\t\trow: " << n.coord[0] << ",  col: " << n.coord[1] << "\n";
+        outfile << "\t\tConnect: " << endl;
+    } outfile << endl;
+
+    outfile << "Building 3-closest graph {node index, distance}" << endl;
+    outfile << "-----------------------------------------------" << endl;
+
+    for (auto& n1 : nodes) {
+        n1.find_nearest_neighbors(nodes, outfile); // Give each node its neighbors
+    } outfile << endl;
+
+    outfile << "Node List with 3+ Connect Graph Computed" << endl;
+    outfile << "----------------------------------------" << endl;
+
+    for (auto &n : nodes) {
+        outfile << "\tNode " << n.index << ":" << endl;
+        outfile << "\t\trow: " << n.coord[0] << ",  col: " << n.coord[1] << "\n";
+        outfile << "\t\tConnect: ";
+        for (const auto &neighbor : n.neighbors) {
+            outfile << neighbor << " ";
+        } outfile << endl;
+    } outfile << endl;
+
+
+    /////* NODE INDEX CHECKING */////
+    int start_index = stoi(argv[3]);
+    int end_index = stoi(argv[4]);
+    if (start_index > nodes.size() || end_index > nodes.size() || start_index < 1 || end_index < 1) {
+        cout << "Invalid endpoint indices" << endl;
+        return 13;
+    }
+
+
+    /////* CREATE PATHS BETWEEN START AND END */////
+    vector<vector<int>> all_paths = find_all_paths(start_index, end_index, 3, 5, nodes);
+
+    outfile << "List of paths from Node " << start_index << " to Node " << end_index << " :" << endl;
+    outfile << "--------------------------------------" << endl;
+    for (const auto& path : all_paths) {
+        outfile << "\t";
+        for (const auto& node : path) {
+            outfile << node;
+            if (node != path.back()) {
+                outfile << "-";
+            }
+        } outfile << endl;
+    }
+
+
+    /////* PASSING NODE PATHS TO CHILD PROCESSES */////
+    int child_count = 0;
+
+    vector<Coordinate> shortest_path;
+    vector<int> shortest_node_path;
+    float best_cost;
+
+    for (const auto& path : all_paths) {
+
+        pid_t pid = fork();
+        // If fork fails, exit
+        if (pid == -1) { exit(50); }
+
+        if (pid == 0) { //* CHILD PROCESS *//
+
+            string scrap_file_path = scrap_path + "/child_" + to_string(++child_count) + ".txt";
+            ofstream scrap_file(scrap_file_path);
+
+            // No work done, just path written to file
+            for (int i : path) {
+                scrap_file << i;
+                if (i != path.back()) {
+                    scrap_file << " ";
+                }
+            } scrap_file << endl << endl << flush;
+            scrap_file.close();
+            exit(0);
+        } //* END CHILD PROCESS *//
+
+        child_count++;
+        int status;
+        while (waitpid(-1, &status, 0) > 0)
+        { /* wait for child to finish */ }
+
+        // Find optimal path between each pair of nodes along the way
+        vector<Coordinate> grid_path;
+        float cost;
+        for (int i = 0; i < path.size() - 1; i++) {
+            float sub_cost;
+            // Find the optimal path between each pair of nodes along the way
+            vector<Coordinate> step = find_cheapest_path(path[i], path[i + 1], weight_grid, nodes, sub_cost);
+            cost += sub_cost;
+            if (i < path.size() - 2) {
+                step.pop_back();
+            }
+            // Add optimal sub-path to overall path
+            grid_path.insert(grid_path.end(), step.begin(), step.end());
+        }
+
+        if (shortest_path.empty() || cost < best_cost) {
+            shortest_path = grid_path;
+            shortest_node_path = path;
+            best_cost = cost;
+        }
+    }
+
+
+    /////* WRITE TO OUTPUT FILE */////
+    // Print the length of the best node path found, and a list of the nodes that make up this path
+    outfile << "Lowest cost path found:" << endl;
+    outfile << "\t" << shortest_node_path.size() << " nodes: ";
+    for (const auto& node : shortest_node_path) {
+        outfile << node;
+        if (node != shortest_node_path.back()) {
+            outfile << " ";
+        }
+    } outfile << endl;
+
+    // Print the length of the best grid path found, and a list of the coordinates of all the grid points that this path goes through
+    outfile << "\t" << shortest_path.size() << " grid points {row, col}: " << endl << "\t" << "\t";
+    for (const auto& coord : shortest_path) {
+        outfile << "{" << coord[0] << ", " << coord[1] << "}";
+        if (coord != shortest_path.back()) {
+            outfile << ", ";
+        }
+    } outfile << endl;
+
+    // Print the total cost of that best path.
+    outfile << "\tTotal cost: " << best_cost << endl;
+
+    // Print coordinates of optimal path to standard output
+    for (const auto& coord : shortest_path) {
+        cout << coord[0] << " " << coord[1];
+        if (coord != shortest_path.back()) {
+            cout << endl;
+        }
+    }
+
+    return 0;
+}
